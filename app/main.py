@@ -203,6 +203,19 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         db.close()
 
 
+def get_current_admin(
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Admin privileges required",
+        )
+
+    return current_user
+
+
+
 @app.get("/auth/me")
 def read_current_user(
     current_user: User = Depends(get_current_user),
@@ -598,7 +611,7 @@ def update_document_status(
     document_id: int,
     request: DocumentStatusUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin),
 ):
     document = (
         db.query(Document)
