@@ -1,0 +1,18 @@
+.env
+
+# Python virtual environments
+.venv/
+.venv-embeddings/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Pytest cache
+.pytest_cache/
+
+# Local uploaded documents
+uploads/
+
+# Environment files
+.env
