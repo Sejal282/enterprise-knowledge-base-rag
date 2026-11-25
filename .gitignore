@@ -16,3 +16,7 @@ uploads/
 
 # Environment files
 .env
+
+# Local application backup files
+app/main.py.backup
+app/main_before_auto_indexing.py
