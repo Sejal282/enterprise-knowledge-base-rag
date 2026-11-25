@@ -1,24 +1,67 @@
+
+from uuid import uuid4
+
 from fastapi.testclient import TestClient
 
 from app import main
 
 
-def test_query_returns_no_answer_when_search_finds_no_passages(monkeypatch):
-    # Simulate semantic search finding no relevant document passages.
-    monkeypatch.setattr(main, "semantic_search", lambda question, limit=3: [])
-
+def authenticated_client():
     client = TestClient(main.app)
+
+    email = f"query_test_{uuid4().hex}@example.com"
+    password = "TestPassword123!"
+
+    # Register a unique test user.
+    register_response = client.post(
+        "/auth/register",
+        json={"email": email, "password": password},
+    )
+    assert register_response.status_code == 201
+
+    # Log in to obtain an access token.
+    login_response = client.post(
+        "/auth/login",
+        json={"email": email, "password": password},
+    )
+    assert login_response.status_code == 200
+
+    token = login_response.json()["access_token"]
+
+    auth_headers = {
+        "Authorization": f"Bearer {token}"
+    }
+
+    return client, auth_headers
+
+
+def test_query_returns_no_answer_when_search_finds_no_passages(
+    monkeypatch,
+):
+    # Simulate semantic search finding no relevant passages.
+    monkeypatch.setattr(
+        main,
+        "semantic_search",
+        lambda question, limit=3: [],
+    )
+
+    client, auth_headers = authenticated_client()
 
     response = client.post(
         "/query",
-        json={"question": "What is the company's annual revenue?"},
+        headers=auth_headers,
+        json={
+            "question": "What is the company's annual revenue?"
+        },
     )
 
     assert response.status_code == 200
 
     data = response.json()
 
-    assert data["question"] == "What is the company's annual revenue?"
+    assert data["question"] == (
+        "What is the company's annual revenue?"
+    )
     assert data["answer"] == (
         "I could not find any indexed document passages "
         "to answer your question."
@@ -26,7 +69,9 @@ def test_query_returns_no_answer_when_search_finds_no_passages(monkeypatch):
     assert data["sources"] == []
 
 
-def test_query_returns_answer_and_sources_when_passages_are_found(monkeypatch):
+def test_query_returns_answer_and_sources_when_passages_are_found(
+    monkeypatch,
+):
     # Simulate semantic search returning one relevant passage.
     fake_result = type(
         "SearchResult",
@@ -45,30 +90,43 @@ def test_query_returns_answer_and_sources_when_passages_are_found(monkeypatch):
         lambda question, limit=3: [fake_result],
     )
 
-    # Simulate Gemini generating an answer from the retrieved passage.
+    # Simulate Gemini generating an answer.
     monkeypatch.setattr(
         main,
         "generate_answer",
-        lambda question, context: "Employees must use secure networks.",
+        lambda question, context: (
+            "Employees must use secure networks."
+        ),
     )
 
-    client = TestClient(main.app)
+    client, auth_headers = authenticated_client()
 
     response = client.post(
         "/query",
-        json={"question": "What are the information security requirements?"},
+        headers=auth_headers,
+        json={
+            "question": (
+                "What are the information security requirements?"
+            )
+        },
     )
 
     assert response.status_code == 200
 
     data = response.json()
 
-    assert data["answer"] == "Employees must use secure networks."
+    assert data["answer"] == (
+        "Employees must use secure networks."
+    )
     assert len(data["sources"]) == 1
     assert data["sources"][0]["document_id"] == 6
-    assert data["sources"][0]["filename"] == "sample_text_based_handbook.pdf"
+    assert data["sources"][0]["filename"] == (
+        "sample_text_based_handbook.pdf"
+    )
     assert data["sources"][0]["chunk_id"] == 18
-    assert data["sources"][0]["text"] == "Employees must use secure networks."
+    assert data["sources"][0]["text"] == (
+        "Employees must use secure networks."
+    )
 
 
 def test_query_returns_500_when_search_fails(monkeypatch):
@@ -76,23 +134,38 @@ def test_query_returns_500_when_search_fails(monkeypatch):
     def failing_search(question, limit=3):
         raise RuntimeError("Simulated search failure")
 
-    monkeypatch.setattr(main, "semantic_search", failing_search)
+    monkeypatch.setattr(
+        main,
+        "semantic_search",
+        failing_search,
+    )
 
     # Gemini should not be called if search fails.
     def unexpected_answer_call(question, context):
         raise AssertionError("Gemini should not be called")
 
-    monkeypatch.setattr(main, "generate_answer", unexpected_answer_call)
+    monkeypatch.setattr(
+        main,
+        "generate_answer",
+        unexpected_answer_call,
+    )
 
-    client = TestClient(main.app)
+    client, auth_headers = authenticated_client()
 
     response = client.post(
         "/query",
-        json={"question": "What are the information security requirements?"},
+        headers=auth_headers,
+        json={
+            "question": (
+                "What are the information security requirements?"
+            )
+        },
     )
 
     assert response.status_code == 500
-    assert response.json()["detail"] == "Knowledge-base search failed."
+    assert response.json()["detail"] == (
+        "Knowledge-base search failed."
+    )
 
 
 def test_query_returns_502_when_gemini_fails(monkeypatch):
@@ -118,13 +191,22 @@ def test_query_returns_502_when_gemini_fails(monkeypatch):
     def failing_answer(question, context):
         raise RuntimeError("Simulated Gemini failure")
 
-    monkeypatch.setattr(main, "generate_answer", failing_answer)
+    monkeypatch.setattr(
+        main,
+        "generate_answer",
+        failing_answer,
+    )
 
-    client = TestClient(main.app)
+    client, auth_headers = authenticated_client()
 
     response = client.post(
         "/query",
-        json={"question": "What are the information security requirements?"},
+        headers=auth_headers,
+        json={
+            "question": (
+                "What are the information security requirements?"
+            )
+        },
     )
 
     assert response.status_code == 502

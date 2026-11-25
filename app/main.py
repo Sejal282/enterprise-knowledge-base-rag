@@ -1,6 +1,6 @@
-from pathlib import Path
-import hashlib
 import logging
+from fastapi import FastAPI
+from pathlib import Path
 
 from fastapi import (
     FastAPI,
@@ -11,14 +11,24 @@ from fastapi import (
     File,
     status,
 )
+from fastapi.security import OAuth2PasswordBearer
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 from pydantic import BaseModel, Field
+from pydantic import EmailStr
 from sqlalchemy import text, bindparam
 from sqlalchemy.orm import Session
 from pgvector.sqlalchemy import Vector
 from sentence_transformers import SentenceTransformer
+from sqlalchemy.exc import IntegrityError
+from app.security import (
+    hash_password,
+    verify_password,
+    create_access_token,
+    decode_access_token,
+)
 
 from app.database import SessionLocal, engine
-from app.models import Document, DocumentChunk
+from app.models import Document, DocumentChunk, User
 from app.pdf_utils import extract_text_from_pdf
 from app.chunking import split_text_into_chunks
 from app.llm import generate_answer
@@ -62,6 +72,148 @@ class DocumentStatusUpdate(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str = Field(min_length=3, max_length=1000)
+
+
+class UserRegister(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+
+@app.post("/auth/register", status_code=201)
+def register_user(user_data: UserRegister):
+    db = SessionLocal()
+
+    try:
+        existing_user = (
+            db.query(User)
+            .filter(User.email == user_data.email)
+            .first()
+        )
+
+        if existing_user:
+            raise HTTPException(
+                status_code=409,
+                detail="Email is already registered",
+            )
+
+        new_user = User(
+            email=str(user_data.email).lower(),
+            password_hash=hash_password(user_data.password),
+            role="user",
+        )
+
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+
+        return {
+            "id": new_user.id,
+            "email": new_user.email,
+            "role": new_user.role,
+        }
+
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Email is already registered",
+        )
+
+    finally:
+        db.close()
+
+
+@app.post("/auth/login")
+def login_user(user_data: UserLogin):
+    db = SessionLocal()
+
+    try:
+        user = (
+            db.query(User)
+            .filter(User.email == str(user_data.email).lower())
+            .first()
+        )
+
+        if not user or not verify_password(
+            user_data.password,
+            user.password_hash,
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        if not user.is_active:
+            raise HTTPException(
+                status_code=403,
+                detail="User account is inactive",
+            )
+
+        access_token = create_access_token(user.id)
+
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+        }
+
+    finally:
+        db.close()
+
+
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    try:
+        payload = decode_access_token(token)
+        user_id = int(payload.get("sub"))
+
+        if user_id is None:
+            raise credentials_exception
+
+    except Exception:
+        raise credentials_exception
+
+    db = SessionLocal()
+
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+
+        if user is None:
+            raise credentials_exception
+
+        if not user.is_active:
+            raise HTTPException(
+                status_code=403,
+                detail="User account is inactive",
+            )
+
+        return user
+
+    finally:
+        db.close()
+
+
+@app.get("/auth/me")
+def read_current_user(
+    current_user: User = Depends(get_current_user),
+):
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "role": current_user.role,
+    }
+
+
 
 
 @app.get("/")
@@ -139,7 +291,10 @@ def semantic_search(
 
 
 @app.post("/query")
-def query_knowledge_base(request: QueryRequest):
+def query_knowledge_base(
+    request: QueryRequest,
+    current_user: User = Depends(get_current_user),
+):
 
     try:
         results = semantic_search(request.question, limit=3)
@@ -210,6 +365,7 @@ def query_knowledge_base(request: QueryRequest):
 def upload_document(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     # Validate the uploaded file.
     if file.content_type != "application/pdf":
@@ -383,6 +539,7 @@ def list_documents(
         pattern="^(pending|completed|needs_ocr)$",
     ),
     db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user),
 ):
     query = db.query(Document)
 
@@ -413,6 +570,7 @@ def list_documents(
 def get_document(
     document_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     document = (
         db.query(Document)
@@ -440,6 +598,7 @@ def update_document_status(
     document_id: int,
     request: DocumentStatusUpdate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     document = (
         db.query(Document)
